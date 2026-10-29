@@ -3,7 +3,6 @@ library("move2")
 library("sf")
 library("leaflet")
 library("shinyBS")
-library("webshot2")
 
 # to display messages to the user in the log file of the App in MoveApps
 # one can use the function from the src/common/logger.R file:
@@ -11,7 +10,6 @@ library("webshot2")
 
 ## helper functions ##
 
-### Helper 1
 # check the FPT settings; returns a message if they are not valid, otherwise NULL
 checkSettings <- function(radius, thr) {
   if (!isTRUE(is.finite(radius) && radius > 0)) return("Please enter a radius larger than 0 m.")
@@ -19,8 +17,6 @@ checkSettings <- function(radius, thr) {
   NULL
 }
 
-
-### Helper 2
 # check the range of radii for the variance of log(FPT); returns a message if not valid, otherwise NULL
 checkRadii <- function(rmin, rmax, n) {
   if (!isTRUE(is.finite(rmin) && rmin > 0)) return("Please enter a smallest radius larger than 0 m.")
@@ -29,7 +25,6 @@ checkRadii <- function(rmin, rmax, n) {
   NULL
 }
 
-### Helper 3
 # fast: FPT <= threshold, slow: FPT > threshold, NA: FPT could not be calculated
 classifyFPT <- function(fptv, thr) {
   ifelse(is.na(fptv), NA_character_, ifelse(fptv <= thr, "fast", "slow"))
@@ -37,8 +32,6 @@ classifyFPT <- function(fptv, thr) {
 
 formatTime <- function(x) format(x, "%Y-%m-%d %H:%M:%S", tz = "UTC")
 
-
-### Helper 4
 # build the ltraj object of one track, projected to an azimuthal equidistant projection
 # centred on the track so that the radius is a true distance in metres.
 # Returns the ltraj, the rows of 'trk' it was built from (non-empty, in time order),
@@ -60,9 +53,7 @@ trackLtraj <- function(trk) {
   list(ltraj = ltr, rows = ok, problem = NA_character_)
 }
 
-
-### Helper 5
-# add base maps and the layer control; osm = FALSE for the map saved as HTML,
+# add base maps and the layer control; osm = FALSE for maps that are saved,
 # because OpenStreetMap blocks tiles requested from a file opened from disk
 addBaseMaps <- function(map, overlayGroups = NULL, osm = TRUE) {
   map <- map %>%
@@ -75,10 +66,8 @@ addBaseMaps <- function(map, overlayGroups = NULL, osm = TRUE) {
                    options = layersControlOptions(collapsed = FALSE))
 }
 
+mapOverlays <- c("lines", "fast movement", "slow movement")
 
-
-
-####### shiny Interface
 shinyModuleUserInterface <- function(id, label) {
   # all IDs of UI functions need to be wrapped in ns()
   ns <- NS(id)
@@ -88,6 +77,15 @@ shinyModuleUserInterface <- function(id, label) {
     sidebarLayout(
       sidebarPanel(
         width = 3,
+        h4("Tracks"),
+        uiOutput(ns("tracks_ui")),
+        fluidRow(
+          column(6, actionButton(ns("select_all_tracks"), "Select All", class = "btn-sm")),
+          column(6, actionButton(ns("unselect_tracks"), "Unselect All", class = "btn-sm"))
+        ),
+        # hidden copy of the track selection as one JSON string, so that "Store settings" can restore it
+        tags$div(style = "display:none;", textInput(ns("tracks_json"), label = NULL, value = "")),
+        hr(),
         h4("Settings"),
         numericInput(ns("radius"), label = "Radius parameter for First Passage Time (m)", value = 30000, min = 1),
         bsTooltip(id = ns("radius"), title = "Define the radius for which you want to calculate the first passage times (when does an animal pass the radius). Unit = m.", placement = "bottom", trigger = "hover", options = list(container = "body")),
@@ -131,30 +129,104 @@ shinyModuleUserInterface <- function(id, label) {
 shinyModule <- function(input, output, session, data) {
   ns <- session$ns
   
-  results <- reactiveVal(NULL)     # annotated data and per-track overview of the last calculation
+  trackRows <- split(seq_len(nrow(data)), mt_track_id(data), drop = TRUE)
+  trackIds <- names(trackRows)
+  
+  
+  
+  results <- reactiveVal(NULL)
+  pendingTracks <- reactiveVal(NULL)
+  lockedTracks <- reactiveVal(NULL)
+  init_applied <- reactiveVal(FALSE)
+  init_done <- reactiveVal(FALSE)
+  
+  observeEvent(input$tracks, {
+    req(!is.null(input$tracks))
+    pendingTracks(as.character(input$tracks))
+    init_applied(TRUE)
+  }, ignoreInit = FALSE)
+  
+  lastTrack <- reactiveVal(NULL)      # track last clicked in the table
   settingsMsg <- reactiveVal(NULL)
   vlfRes <- reactiveVal(NULL)
   vlfMsg <- reactiveVal(NULL)
   
-  ## FPT calculation: runs once at App start and on every click of "Apply Changes" ##
+  ## track selection ##
+  output$tracks_ui <- renderUI({
+    restored_sel <- isolate(input$tracks)
+    
+    sel <- if (!is.null(restored_sel)) {
+      intersect(as.character(restored_sel), trackIds)
+    } else {
+      trackIds
+    }
+    
+    logger.info(
+      "tracks_ui: choices=%d, selected=%d",
+      length(trackIds),
+      length(sel)
+    )
+    
+    checkboxGroupInput(
+      ns("tracks"),
+      label = NULL,
+      choices = trackIds,
+      selected = sel
+    )
+  })
+  
+  
+  # keep the JSON copy up to date (also when no track is selected)
+  observeEvent(input$tracks, {
+    updateTextInput(session, "tracks_json", value = as.character(jsonlite::toJSON(as.character(input$tracks))))
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  
+  observeEvent(input$select_all_tracks, {
+    updateCheckboxGroupInput(session, "tracks", selected = trackIds)
+  })
+  
+  observeEvent(input$unselect_tracks, {
+    updateCheckboxGroupInput(session, "tracks", selected = character(0))
+  })
+  
+  ## initialize the shown tracks once from the restored/default checkbox selection
+  observe({
+    if (isTRUE(init_done())) return()
+    req(init_applied())
+    
+    sel <- pendingTracks()
+    if (is.null(sel) || !length(sel)) return()
+    
+    lockedTracks(sel)
+    init_done(TRUE)
+  })
+  
+  shownTracks <- reactive({
+    req(init_done())
+    lockedTracks()
+  })
+  
+  ## FPT calculation for all tracks: runs once at App start and on every click of "Apply Changes" ##
   observeEvent(input$goButton, {
+    clicked <- isTRUE(input$goButton > 0)
     msg <- checkSettings(input$radius, input$time_thr)
+    if (is.null(msg) && clicked && length(input$tracks) == 0) msg <- "Please select at least one track."
     if (!is.null(msg)) {
       settingsMsg(msg)
       logger.info(msg)
       return()
     }
     settingsMsg(NULL)
+    if (clicked) lockedTracks(as.character(input$tracks))
     radius <- input$radius
     thr <- input$time_thr
     unit <- input$thr_uni
     
-    trackRows <- split(seq_len(nrow(data)), mt_track_id(data), drop = TRUE)
     fptv <- rep(NA_real_, nrow(data))
-    problems <- setNames(rep(NA_character_, length(trackRows)), names(trackRows))
+    problems <- setNames(rep(NA_character_, length(trackIds)), trackIds)
     
     withProgress(message = "Calculating first passage times", value = 0, {
-      for (tid in names(trackRows)) {
+      for (tid in trackIds) {
         rows <- trackRows[[tid]]
         lt <- trackLtraj(data[rows, ])
         if (is.null(lt$ltraj)) {
@@ -164,7 +236,7 @@ shinyModule <- function(input, output, session, data) {
           f <- adehabitatLT::fpt(lt$ltraj, radii = radius, units = unit)
           fptv[rows[lt$rows]] <- f[[1]][, 1]
         }
-        incProgress(1 / length(trackRows), detail = tid)
+        incProgress(1 / length(trackIds), detail = tid)
       }
     })
     
@@ -175,7 +247,7 @@ shinyModule <- function(input, output, session, data) {
     annotated$fpt_value <- fptv
     annotated$fpt_behaviour <- classifyFPT(fptv, thr)
     
-    overview <- do.call(rbind, lapply(names(trackRows), function(tid) {
+    overview <- do.call(rbind, lapply(trackIds, function(tid) {
       rows <- trackRows[[tid]]
       tms <- mt_time(data)[rows]
       cls <- annotated$fpt_behaviour[rows]
@@ -192,41 +264,50 @@ shinyModule <- function(input, output, session, data) {
                  check.names = FALSE)
     }))
     
-    logger.info(paste0("First passage times calculated for ", length(trackRows), " track(s) with radius ", radius, " m and threshold ", thr, " ", unit, "."))
-    results(list(data = annotated, trackRows = trackRows, overview = overview,
-                 radius = radius, thr = thr, unit = unit))
+    logger.info(paste0("First passage times calculated for ", length(trackIds), " track(s) with radius ", radius, " m and threshold ", thr, " ", unit, "."))
+    results(list(data = annotated, overview = overview, radius = radius, thr = thr, unit = unit))
   }, ignoreNULL = FALSE)
   
   output$settings_msg <- renderUI({
     if (!is.null(settingsMsg())) p(settingsMsg(), style = "color: red;")
   })
   
-  ## track table and selection ##
-  output$track_table <- DT::renderDataTable({
+  ## table of the selected tracks; a click on a row selects the track for plot and map ##
+  shownOverview <- reactive({
     res <- results()
     req(res)
-    # keep a restored or previous selection if it is still valid
-    sel <- isolate(input$track_table_rows_selected)
-    if (!(length(sel) == 1 && sel >= 1 && sel <= nrow(res$overview))) sel <- 1
-    DT::datatable(res$overview, rownames = FALSE,
+    res$overview[res$overview$Track %in% shownTracks(), , drop = FALSE]
+  })
+  
+  output$track_table <- DT::renderDataTable({
+    ov <- shownOverview()
+    # keep the last clicked track if it is still shown, else a restored row, else the first row
+    lt <- isolate(lastTrack())
+    sel <- if (!is.null(lt) && lt %in% ov$Track) match(lt, ov$Track) else isolate(input$track_table_rows_selected)
+    if (!(length(sel) == 1 && sel >= 1 && sel <= nrow(ov))) sel <- 1
+    DT::datatable(ov, rownames = FALSE,
                   selection = list(mode = "single", selected = sel, target = "row"),
                   options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollY = 200, scrollCollapse = TRUE))
   })
   
-  selectedIdx <- reactive({
-    res <- results()
-    req(res)
+  observeEvent(input$track_table_rows_selected, {
+    ov <- shownOverview()
     i <- input$track_table_rows_selected
-    if (length(i) == 1 && i >= 1 && i <= nrow(res$overview)) i else 1
+    if (length(i) == 1 && i >= 1 && i <= nrow(ov)) lastTrack(ov$Track[i])
+  })
+  
+  selectedTrack <- reactive({
+    ov <- shownOverview()
+    tid <- lastTrack()
+    if (!is.null(tid) && tid %in% ov$Track) tid else ov$Track[1]
   })
   
   ## FPT plot of the selected track ##
   output$fpt <- renderPlot({
     res <- results()
     req(res)
-    i <- selectedIdx()
-    tid <- res$overview$Track[i]
-    trk <- res$data[res$trackRows[[i]], ]
+    tid <- selectedTrack()
+    trk <- res$data[trackRows[[tid]], ]
     validate(need(any(!is.na(trk$fpt_value)), paste0("No first passage times could be calculated for track ", tid, ".")))
     ord <- order(mt_time(trk))
     tms <- mt_time(trk)[ord]
@@ -240,13 +321,12 @@ shinyModule <- function(input, output, session, data) {
            col = c("red", "darkgreen", "blue"), pch = c(20, 20, NA), lty = c(NA, NA, 1), lwd = c(NA, NA, 2), bg = "white")
   })
   
-  ## map of the selected track ##
+  ## map of the selected track (without base maps, see addBaseMaps()) ##
   mapLayers <- reactive({
     res <- results()
     req(res)
-    i <- selectedIdx()
-    tid <- res$overview$Track[i]
-    trk <- res$data[res$trackRows[[i]], ]
+    tid <- selectedTrack()
+    trk <- res$data[trackRows[[tid]], ]
     trk <- trk[!sf::st_is_empty(trk), ]
     validate(need(nrow(trk) > 0, paste0("Track ", tid, " has no locations to show.")))
     trk <- trk[order(mt_time(trk)), ]
@@ -278,9 +358,8 @@ shinyModule <- function(input, output, session, data) {
                   options = scaleBarOptions(maxWidth = 100, metric = TRUE, imperial = FALSE, updateWhenIdle = TRUE))
   })
   
-  
   output$leafmap <- renderLeaflet({
-    addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"))
+    addBaseMaps(mapLayers(), mapOverlays)
   })
   
   ## variance of log(FPT) over a range of radii for the selected track ##
@@ -294,9 +373,8 @@ shinyModule <- function(input, output, session, data) {
       return()
     }
     vlfMsg(NULL)
-    i <- selectedIdx()
-    tid <- res$overview$Track[i]
-    lt <- trackLtraj(res$data[res$trackRows[[i]], ])
+    tid <- selectedTrack()
+    lt <- trackLtraj(res$data[trackRows[[tid]], ])
     if (is.null(lt$ltraj)) {
       vlfRes(list(track = tid, problem = lt$problem))
       return()
@@ -332,36 +410,37 @@ shinyModule <- function(input, output, session, data) {
     filename = "FPT_LeafletMap.html",
     content = function(file) {
       shinybusy::show_modal_spinner(text = "Preparing map ...")
-      on.exit(shinybusy::remove_modal_spinner())
-      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"), osm = FALSE), file = file)
+      on.exit(shinybusy::remove_modal_spinner(), add = TRUE)
+      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), mapOverlays, osm = FALSE),
+                              file = file, selfcontained = TRUE)
     }
   )
-  
   
   output$saveMapPng <- downloadHandler(
     filename = "FPT_Map.png",
     content = function(file) {
       shinybusy::show_modal_spinner(text = "Preparing PNG ...")
       on.exit(shinybusy::remove_modal_spinner(), add = TRUE)
-      # as in Leaflet Mapper: save the map in the working directory, where the browser
-      # used by webshot2 can open it; OpenStreetMap tiles are blocked from a local file
+      # save the map in the working directory, where the browser used by webshot2
+      # can open it; OpenStreetMap tiles are blocked from a local file
       html_file <- "FPT_map_export.html"
       on.exit(unlink(c(html_file, "FPT_map_export_files"), recursive = TRUE), add = TRUE)
-      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"), osm = FALSE),
+      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), mapOverlays, osm = FALSE),
                               file = html_file, selfcontained = TRUE)
       Sys.sleep(2)
       webshot2::webshot(url = html_file, file = file, vwidth = 1000, vheight = 800, delay = 2)
     }
   )
   
+  # the CSV downloads contain the tracks selected in the sidebar
   output$saveCsv <- downloadHandler(
     filename = "FPT_values.csv",
     content = function(file) {
       shinybusy::show_modal_spinner(text = "Preparing table ...")
-      on.exit(shinybusy::remove_modal_spinner())
+      on.exit(shinybusy::remove_modal_spinner(), add = TRUE)
       res <- results()
       req(res)
-      d <- res$data
+      d <- res$data[sort(unlist(trackRows[shownTracks()], use.names = FALSE)), ]
       co <- matrix(NA_real_, nrow = nrow(d), ncol = 2)
       nonempty <- !sf::st_is_empty(d)
       if (any(nonempty)) co[nonempty, ] <- sf::st_coordinates(sf::st_transform(d[nonempty, ], 4326))[, 1:2]
@@ -385,7 +464,7 @@ shinyModule <- function(input, output, session, data) {
     content = function(file) {
       res <- results()
       req(res)
-      out <- res$overview
+      out <- shownOverview()
       out$radius_m <- res$radius
       out$threshold <- res$thr
       out$fpt_unit <- res$unit
