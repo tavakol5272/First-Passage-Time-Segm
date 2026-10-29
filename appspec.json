@@ -1,78 +1,66 @@
 {
   "version": "1.2",
-  "settings": [],
+  "settings": [
+    {
+      "id": "auxiliary-file-a",
+      "name": "Personalization",
+      "description": "You can personalize the app by providing a file",
+      "type": "USER_FILE"
+    }
+  ],
   "dependencies": {
     "R": [
       {
         "name": "shiny"
       },
       {
-        "name": "move2"
-      },
-      {
         "name": "sf"
       },
       {
-        "name": "adehabitatLT"
-      },
-      {
-        "name": "leaflet"
-      },
-      {
-        "name": "DT"
-      },
-      {
-        "name": "htmlwidgets"
-      },
-      {
-        "name": "shinyBS"
+       "remotes": "install_git('https://gitlab.com/bartk/move2.git')"
       }
     ]
   },
+  "providedAppFiles": [
+    {
+      "settingId": "auxiliary-file-a",
+      "from": "data/auxiliary/user-files/provided-app-files/auxiliary-file-a/sample.txt"
+    }
+  ],
   "license": {
     "key": "MIT"
   },
   "language": "eng",
   "keywords": [
-    "first passage time",
-    "FPT",
-    "segmentation",
-    "behaviour classification",
-    "resting",
-    "migration",
-    "map",
-    "shiny"
+    "example",
+    "template"
   ],
   "people": [
     {
-      "firstName": "Andrea",
+      "firstName": "Charles",
       "middleInitials": null,
-      "lastName": "Kölzsch",
-      "email": "akoelzsch@ab.mpg.de",
-      "roles": ["author", "creator"],
-      "orcid": "0000-0003-0193-1563",
-      "affiliation": "Max-Planck-Institute of Animal Behavior",
-      "affiliationRor": "https://ror.org/026stee22"
-    },
+      "lastName": "Darwin",
+      "email": "creator@example.com",
+      "roles": [
+        "author",
+        "creator"
+      ],
+      "orcid": null,
+      "affiliation": null,
+      "affiliationRor": null
+    }
+  ],
+  "funding": [
     {
-      "firstName": "Anne",
-      "middleInitials": "K",
-      "lastName": "Scharf",
-      "email": "ascharf@ab.mpg.de",
-      "roles": ["contributor"],
-      "orcid": "0000-0002-3357-8533",
-      "affiliation": "Max-Planck-Institute of Animal Behavior",
-      "affiliationRor": "https://ror.org/026stee22"
-    },
+      "name": "funder name",
+      "comment": "grant for App"
+    }
+  ],
+  "references": [
     {
-      "firstName": "Nafiseh",
-      "middleInitials": null,
-      "lastName": "Tavakol",
-      "email": "ntavakol@ab.mpg.de",
-      "roles": ["contributor"],
-      "orcid": "0000-0003-3674-4784",
-      "affiliation": "Max-Planck-Institute of Animal Behavior",
-      "affiliationRor": "https://ror.org/026stee22"
+      "type": "IsDescribedBy",
+      "note": "Darwin, C. 1900. The creation. Journal XY. 1-2",
+      "url": "https://anylink.xyz"
     }
   ]
 }
