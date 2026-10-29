@@ -1,66 +1,67 @@
 {
   "version": "1.2",
-  "settings": [
-    {
-      "id": "auxiliary-file-a",
-      "name": "Personalization",
-      "description": "You can personalize the app by providing a file",
-      "type": "USER_FILE"
-    }
-  ],
+  "settings": [],
   "dependencies": {
     "R": [
-      {
-        "name": "shiny"
-      },
-      {
-        "name": "sf"
-      },
-      {
-       "remotes": "install_git('https://gitlab.com/bartk/move2.git')"
-      }
+      { "name": "shiny" },
+      { "name": "move2" },
+      { "name": "sf" },
+      { "name": "sp" },
+      { "name": "adehabitatLT" },
+      { "name": "leaflet" },
+      { "name": "htmlwidgets" },
+      { "name": "webshot2" },
+      { "name": "DT" },
+      { "name": "shinyBS" },
+      { "name": "shinycssloaders" },
+      { "name": "shinybusy" }
     ]
   },
-  "providedAppFiles": [
-    {
-      "settingId": "auxiliary-file-a",
-      "from": "data/auxiliary/user-files/provided-app-files/auxiliary-file-a/sample.txt"
-    }
-  ],
   "license": {
     "key": "MIT"
   },
   "language": "eng",
   "keywords": [
-    "example",
-    "template"
+    "first passage time",
+    "FPT",
+    "segmentation",
+    "area-restricted search",
+    "behaviour",
+    "resting",
+    "stopover",
+    "map",
+    "shiny"
   ],
   "people": [
     {
-      "firstName": "Charles",
+      "firstName": "Andrea",
       "middleInitials": null,
-      "lastName": "Darwin",
-      "email": "creator@example.com",
-      "roles": [
-        "author",
-        "creator"
-      ],
-      "orcid": null,
-      "affiliation": null,
-      "affiliationRor": null
-    }
-  ],
-  "funding": [
+      "lastName": "Kölzsch",
+      "email": "akoelzsch@ab.mpg.de",
+      "roles": ["author", "creator"],
+      "orcid": "0000-0003-0193-1563",
+      "affiliation": "Max-Planck-Institute of Animal Behavior",
+      "affiliationRor": "https://ror.org/026stee22"
+    },
     {
-      "name": "funder name",
-      "comment": "grant for App"
-    }
-  ],
-  "references": [
+      "firstName": "Anne",
+      "middleInitials": "K",
+      "lastName": "Scharf",
+      "email": "ascharf@ab.mpg.de",
+      "roles": ["contributor"],
+      "orcid": "0000-0002-3357-8533",
+      "affiliation": "Max-Planck-Institute of Animal Behavior",
+      "affiliationRor": "https://ror.org/026stee22"
+    },
     {
-      "type": "IsDescribedBy",
-      "note": "Darwin, C. 1900. The creation. Journal XY. 1-2",
-      "url": "https://anylink.xyz"
+      "firstName": "Nafiseh",
+      "middleInitials": null,
+      "lastName": "Tavakol",
+      "email": "ntavakol@ab.mpg.de",
+      "roles": ["contributor"],
+      "orcid": "0000-0003-3674-4784",
+      "affiliation": "Max-Planck-Institute of Animal Behavior",
+      "affiliationRor": "https://ror.org/026stee22"
     }
   ]
 }
