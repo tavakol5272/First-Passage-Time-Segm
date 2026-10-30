@@ -38,28 +38,56 @@ classifyFPT <- function(fptv, thr) {
 formatTime <- function(x) format(x, "%Y-%m-%d %H:%M:%S", tz = "UTC")
 
 
-### Helper 4
-# build the ltraj object of one track, projected to an azimuthal equidistant projection
-# centred on the track so that the radius is a true distance in metres.
-# Returns the ltraj, the rows of 'trk' it was built from (non-empty, in time order),
-# or a problem description if FPT cannot be calculated for this track
+### Helper 4 :metric projection for the FPT calculation.
 trackLtraj <- function(trk) {
-  if (is.na(sf::st_crs(trk))) return(list(problem = "no coordinate reference system"))
+  
+  if (is.na(sf::st_crs(trk))) {
+    return(list(problem = "no coordinate reference system"))
+  }
+  
   ok <- which(!sf::st_is_empty(trk))
-  if (length(ok) < 3) return(list(problem = "fewer than 3 locations"))
+  
+  if (length(ok) < 3) {
+    return(list(problem = "fewer than 3 locations"))
+  }
+  
   tms <- mt_time(trk)[ok]
-  if (anyDuplicated(tms) > 0) return(list(problem = "duplicated timestamps"))
+  
+  if (anyDuplicated(tms) > 0) {
+    return(list(problem = "duplicated timestamps"))
+  }
+  
   ok <- ok[order(tms)]
-  ll <- sf::st_coordinates(sf::st_transform(trk[ok, ], 4326))
-  aeqd <- sprintf("+proj=aeqd +lat_0=%.6f +lon_0=%.6f +units=m", mean(ll[, 2]), mean(ll[, 1]))
-  xy <- sf::st_coordinates(sf::st_transform(trk[ok, ], aeqd))
-  ltr <- adehabitatLT::as.ltraj(xy = data.frame(x = xy[, 1], y = xy[, 2]),
-                                date = as.POSIXct(mt_time(trk)[ok]),
-                                id = "track", typeII = TRUE,
-                                proj4string = sp::CRS(aeqd))
-  list(ltraj = ltr, rows = ok, problem = NA_character_)
+  
+  # trk is in longitude/latitude coordinates:
+  # either already geographic or transformed to EPSG:4326 in data_ll
+  ll <- sf::st_coordinates(trk[ok, ])
+  
+  # local metric projection centred on this track
+  aeqd <- sprintf(
+    "+proj=aeqd +lat_0=%.6f +lon_0=%.6f +units=m",
+    mean(ll[, 2]),
+    mean(ll[, 1])
+  )
+  
+  # convert longitude/latitude to x/y in metres
+  trk_m <- sf::st_transform(trk[ok, ], aeqd)
+  xy <- sf::st_coordinates(trk_m)
+  
+  ltr <- adehabitatLT::as.ltraj(
+    xy = data.frame(x = xy[, 1], y = xy[, 2]),
+    date = as.POSIXct(mt_time(trk)[ok]),
+    id = "track",
+    typeII = TRUE,
+    proj4string = sp::CRS(aeqd)
+  )
+  
+  list(
+    ltraj = ltr,
+    rows = ok,
+    problem = NA_character_
+  )
 }
-
 
 ### Helper 5
 # add base maps and the layer control; osm = FALSE for the map saved as HTML,
@@ -95,6 +123,7 @@ shinyModuleUserInterface <- function(id, label) {
         bsTooltip(id = ns("time_thr"), title = "Define the time threshold with which you will split your tracks into fast and slow movement locations. Locations with a first passage time up to this threshold are fast, above it slow (resting). Select your time unit below.", placement = "bottom", trigger = "hover", options = list(container = "body")),
         selectInput(ns("thr_uni"), label = "Unit of the threshold time", choices = c("seconds", "hours", "days"), selected = "days"),
         bsTooltip(id = ns("thr_uni"), title = "Select the time unit of your selected threshold time. First passage times are given in this unit.", placement = "bottom", trigger = "hover", options = list(container = "body")),
+        checkboxInput(ns("add_fpt_columns"),"Add FPT results to workflow data", value = TRUE),
         actionButton(ns("goButton"), "Apply Changes", class = "btn-primary btn-block"),
         uiOutput(ns("settings_msg")),
         hr(),
@@ -131,10 +160,22 @@ shinyModuleUserInterface <- function(id, label) {
 shinyModule <- function(input, output, session, data) {
   ns <- session$ns
   
+  # longitude/latitude working copy;
+  # keep the original workflow data and CRS unchanged
+  data_ll <- if (
+    is.na(sf::st_crs(data)) ||
+    isTRUE(sf::st_is_longlat(data))
+  ) {
+    data
+  } else {
+    sf::st_transform(data, 4326)
+  }
+  
   results <- reactiveVal(NULL)     # annotated data and per-track overview of the last calculation
   settingsMsg <- reactiveVal(NULL)
   vlfRes <- reactiveVal(NULL)
   vlfMsg <- reactiveVal(NULL)
+  addFptColumnsApplied <- reactiveVal(TRUE)
   
   ## FPT calculation: runs once at App start and on every click of "Apply Changes" ##
   observeEvent(input$goButton, {
@@ -148,6 +189,7 @@ shinyModule <- function(input, output, session, data) {
     radius <- input$radius
     thr <- input$time_thr
     unit <- input$thr_uni
+    addFptColumnsApplied(isTRUE(input$add_fpt_columns))
     
     trackRows <- split(seq_len(nrow(data)), mt_track_id(data), drop = TRUE)
     fptv <- rep(NA_real_, nrow(data))
@@ -156,7 +198,7 @@ shinyModule <- function(input, output, session, data) {
     withProgress(message = "Calculating first passage times", value = 0, {
       for (tid in names(trackRows)) {
         rows <- trackRows[[tid]]
-        lt <- trackLtraj(data[rows, ])
+        lt <- trackLtraj(data_ll[rows, ])
         if (is.null(lt$ltraj)) {
           problems[tid] <- lt$problem
           logger.warn(paste0("First passage time could not be calculated for track ", tid, ": ", lt$problem, ". Its fpt_value and fpt_behaviour are NA."))
@@ -296,7 +338,7 @@ shinyModule <- function(input, output, session, data) {
     vlfMsg(NULL)
     i <- selectedIdx()
     tid <- res$overview$Track[i]
-    lt <- trackLtraj(res$data[res$trackRows[[i]], ])
+    lt <- trackLtraj(data_ll[res$trackRows[[i]], ])
     if (is.null(lt$ltraj)) {
       vlfRes(list(track = tid, problem = lt$problem))
       return()
@@ -396,6 +438,15 @@ shinyModule <- function(input, output, session, data) {
   # data must be returned. Either the unmodified input data, or the modified data by the app
   reactive({
     res <- results()
-    if (is.null(res)) data else res$data
+    
+    if (is.null(res)) {
+      return(data)
+    }
+    
+    if (isTRUE(addFptColumnsApplied())) {
+      res$data
+    } else {
+      data
+    }
   })
 }
