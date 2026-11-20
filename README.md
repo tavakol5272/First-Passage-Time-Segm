@@ -20,11 +20,11 @@ Changes of the settings take effect when `Apply Changes` is clicked; the FPT is 
 
 All tracks are listed in an overview table with their first and last timestamp, number of locations, number of fast and slow locations, the percentage of slow locations and a note if the FPT could not be calculated. Clicking a row in the table shows that track in three tabs:
 
-- **FPT plot**: FPT over time, with fast locations in red, slow locations in green and the threshold as a blue line.
+- **FPT plot**: FPT over time, with fast locations in red, slow locations in green and the threshold as a blue line. The legend is shown above the plot.
 - **Map**: the track as a line with the fast (red) and slow (green) locations; clicking a location shows its time, FPT value and class. Base maps: Esri topographic map (default), Esri aerial imagery and OpenStreetMap.
-- **Choose radius**: the variance of log(FPT) for a range of radii (Fauchald & Tveraa 2003). A peak in this curve indicates the spatial scale at which the animal concentrates its activity and can be used to choose the radius. Several peaks can indicate behaviour at several scales. The plot is calculated for the track selected in the table when `Calculate` is clicked.
+- **Choose radius**: the variance of log(FPT) for a range of radii (Fauchald & Tveraa 2003). A peak in this curve indicates the spatial scale at which the animal concentrates its activity and can be used to choose the radius. Several peaks can indicate behaviour at several scales. The plot is calculated for the track selected in the table when `Calculate` is clicked. The radius currently used for the FPT is shown as a dashed blue line; the legend is shown above the plot.
 
-The FPT values and classes of all tracks are added to the output data, so that they can be used in subsequent Apps.
+If `Add FPT results to workflow data` is selected (default), the FPT values and classes of all tracks are added to the output data, so that they can be used in subsequent Apps. Otherwise the input data are passed on unchanged.
 
 Fauchald, P. & Tveraa, T. 2003. Using first-passage time in the analysis of area-restricted search and habitat selection. Ecology 84(2): 282-288. https://doi.org/10.1890/0012-9658(2003)084[0282:UFPTIT]2.0.CO;2
 
@@ -61,7 +61,9 @@ The following files can be downloaded optionally (to disk):
 
 `Unit of the threshold time` (thr_uni): time unit of the threshold and of the FPT values: seconds, hours or days. Default: days.
 
-`Apply Changes`: applies the settings above and recalculates the FPT for all tracks.
+`Add FPT results to workflow data` (add_fpt_columns): if selected, the columns `fpt_value` and `fpt_behaviour` are added to the output data; if not, the input data are passed on unchanged. Default: selected.
+
+`Apply Changes`: applies the settings above, including `Add FPT results to workflow data`, and recalculates the FPT for all tracks.
 
 **Track table**
 
@@ -78,7 +80,7 @@ Click a row in the table to show that track in the FPT plot, the map and the plo
 `Calculate`: calculates the variance of log(FPT) for the track selected in the table and shows it in the tab "Choose radius".
 
 ### Changes in output data
-The App adds the columns `fpt_value` (first passage time in the selected unit) and `fpt_behaviour` (`fast`, `slow` or NA) to the input data. All other data remain unchanged.
+If `Add FPT results to workflow data` is selected (default), the App adds the columns `fpt_value` (first passage time in the selected unit) and `fpt_behaviour` (`fast`, `slow` or NA) to the input data. All other data remain unchanged. If it is not selected, the output data are the unchanged input data.
 
 ### Errors and null handling
 **Settings:** invalid values (e.g. a radius of 0) show a red message under the button, and the last result is kept.
@@ -86,6 +88,8 @@ The App adds the columns `fpt_value` (first passage time in the selected unit) a
 **Input data:** tracks with fewer than 3 locations or duplicated timestamps are not analysed; their FPT values are NA and the reason is shown in the table.
 
 **All locations fast or slow:** the threshold does not fit the FPT values. Adapt the threshold or its unit, or choose another radius with "Choose radius".
+
+**Small plot area:** if the window is too small for a plot, the message "The plot area is too small. Please enlarge the window." is shown instead of the plot.
 
 ### Technical details
 - The FPT is calculated per track with `fpt()` and `varlogfpt()` from the R package `adehabitatLT`.

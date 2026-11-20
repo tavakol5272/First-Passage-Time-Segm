@@ -103,7 +103,15 @@ addBaseMaps <- function(map, overlayGroups = NULL, osm = TRUE) {
                    options = layersControlOptions(collapsed = FALSE))
 }
 
-
+### Helper 6
+# TRUE if the current plot device is large enough for the margins set with par(mar);
+# the browser can report a very small plot size for a moment, e.g. while the window
+# is moved to another monitor, and plot() would then fail with "figure margins too large"
+plotFits <- function(min_inch = 0.5) {
+  mai <- par("mai")
+  inner <- par("din") - c(mai[2] + mai[4], mai[1] + mai[3])
+  all(inner > min_inch)
+}
 
 
 ####### shiny Interface
@@ -255,11 +263,15 @@ shinyModule <- function(input, output, session, data) {
                   options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollY = 200, scrollCollapse = TRUE))
   })
   
-  selectedIdx <- reactive({
+  # index of the selected track; a reactiveVal only invalidates the plots and the map when the
+  # value really changes, so the initial row selection sent by the table (row 1, the track
+  # already shown) does not draw them a second time
+  selectedIdx <- reactiveVal(1)
+  observe({
     res <- results()
     req(res)
     i <- input$track_table_rows_selected
-    if (length(i) == 1 && i >= 1 && i <= nrow(res$overview)) i else 1
+    selectedIdx(if (length(i) == 1 && i >= 1 && i <= nrow(res$overview)) i else 1)
   })
   
   ## FPT plot of the selected track ##
@@ -274,13 +286,20 @@ shinyModule <- function(input, output, session, data) {
     tms <- mt_time(trk)[ord]
     v <- trk$fpt_value[ord]
     cls <- trk$fpt_behaviour[ord]
-    plot(tms, v, type = "l", main = tid, ylab = paste0("FPT (", res$unit, ")"), xlab = "time")
+    par(mar = c(5.1, 4.1, 6, 2.1))   # extra space at the top for the legend
+    validate(need(plotFits(), "The plot area is too small. Please enlarge the window."))
+    plot(tms, v, type = "l", main = "", ylab = paste0("FPT (", res$unit, ")"), xlab = "time")
+    title(main = tid, line = 3.5)    # title above the legend
     points(tms[cls %in% "fast"], v[cls %in% "fast"], cex = 2, pch = 20, col = "red")
     points(tms[cls %in% "slow"], v[cls %in% "slow"], cex = 2, pch = 20, col = "darkgreen")
     abline(h = res$thr, col = "blue", lwd = 2)
-    legend("topright", legend = c("fast movement", "slow movement", "threshold"),
-           col = c("red", "darkgreen", "blue"), pch = c(20, 20, NA), lty = c(NA, NA, 1), lwd = c(NA, NA, 2), bg = "white")
-  })
+    # legend directly above the plot area, between the title and the plot
+    usr <- par("usr")
+    legend(x = mean(usr[1:2]), y = usr[4], xjust = 0.5, yjust = 0, xpd = TRUE,
+           horiz = TRUE, bty = "n", cex = 1.2, text.font = 2,
+           legend = c("fast movement", "slow movement", "threshold"),
+           col = c("red", "darkgreen", "blue"), pch = c(20, 20, NA), lty = c(NA, NA, 1), lwd = c(NA, NA, 2))
+  }, execOnResize = TRUE)   # redraw on resize (e.g. moving to another monitor) instead of replaying
   
   ## map of the selected track ##
   mapLayers <- reactive({
@@ -360,14 +379,21 @@ shinyModule <- function(input, output, session, data) {
     vr <- vlfRes()
     validate(need(!is.null(vr), "Set the range of radii in the sidebar and click 'Calculate' to compute the variance of log(FPT) for the track selected in the table."))
     validate(need(is.na(vr$problem), paste0("The variance of log(FPT) could not be calculated for track ", vr$track, ": ", vr$problem, ".")))
-    plot(vr$radii, vr$var, type = "b", pch = 20, main = paste("Track", vr$track),
-         xlab = "radius (m)", ylab = "variance of log(FPT)")
     res <- results()
+    par(mar = c(5.1, 4.1, 6, 2.1))   # extra space at the top for the legend
+    validate(need(plotFits(), "The plot area is too small. Please enlarge the window."))
+    plot(vr$radii, vr$var, type = "b", pch = 20, main = "",
+         xlab = "radius (m)", ylab = "variance of log(FPT)")
+    title(main = paste("Track", vr$track), line = 3.5)   # title above the legend
     if (!is.null(res)) {
       abline(v = res$radius, col = "blue", lty = 2)
-      legend("topright", legend = "current radius", col = "blue", lty = 2, bg = "white")
+      # legend directly above the plot area, between the title and the plot
+      usr <- par("usr")
+      legend(x = mean(usr[1:2]), y = usr[4], xjust = 0.5, yjust = 0, xpd = TRUE,
+             horiz = TRUE, bty = "n", cex = 1.2, text.font = 2,
+             legend = "current radius", col = "blue", lty = 2)
     }
-  })
+  }, execOnResize = TRUE)   # redraw on resize (e.g. moving to another monitor) instead of replaying
   
   ## downloads ##
   output$saveMap <- downloadHandler(
@@ -387,8 +413,9 @@ shinyModule <- function(input, output, session, data) {
       on.exit(shinybusy::remove_modal_spinner(), add = TRUE)
       # as in Leaflet Mapper: save the map in the working directory, where the browser
       # used by webshot2 can open it; OpenStreetMap tiles are blocked from a local file
-      html_file <- "FPT_map_export.html"
-      on.exit(unlink(c(html_file, "FPT_map_export_files"), recursive = TRUE), add = TRUE)
+      # session$token in the name, so two users never write or delete each other's file
+      html_file <- paste0("FPT_map_export_", session$token, ".html")
+      on.exit(unlink(c(html_file, sub("\\.html$", "_files", html_file)), recursive = TRUE), add = TRUE)
       htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"), osm = FALSE),
                               file = html_file, selfcontained = TRUE)
       Sys.sleep(2)
