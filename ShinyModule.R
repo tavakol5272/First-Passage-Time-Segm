@@ -4,6 +4,7 @@ library("sf")
 library("leaflet")
 library("shinyBS")
 library("webshot2")
+library(segclust2d)
 
 # to display messages to the user in the log file of the App in MoveApps
 # one can use the function from the src/common/logger.R file:
@@ -113,6 +114,46 @@ plotFits <- function(min_inch = 0.5) {
   all(inner > min_inch)
 }
 
+### Helper 7
+# check the segmentation settings; returns a message if they are not valid, otherwise NULL
+checkSegSettings <- function(minDays, Kmax, K = NULL) {
+  if (!isTRUE(is.finite(minDays) && minDays > 0)) return("Please enter a minimum segment length larger than 0 days.")
+  if (!isTRUE(is.finite(Kmax) && Kmax >= 2 && Kmax <= 50)) return("The maximum number of segments must be between 2 and 50.")
+  if (!is.null(K) && !isTRUE(is.finite(K) && K >= 1 && K <= Kmax)) return("The fixed number of segments must be between 1 and the maximum number of segments.")
+  NULL
+}
+
+### Helper 8
+# segment the log10 FPT series of one track into phases (Lavielle's penalised contrast, package
+# segclust2d), as in "Segmenting first passage time" of Analysing and Mapping of Animal Movement in R;
+# returns the segments, or a problem message
+segmentTrack <- function(fptv, tms, minDays, Kmax, K = NULL) {
+  keep <- which(!is.na(fptv) & fptv > 0)
+  if (length(keep) < 2) return(list(problem = "no first passage times"))
+  ord <- keep[order(tms[keep])]
+  # minimum segment length in locations, from the median sampling interval of this track
+  dt <- median(as.numeric(diff(tms[ord]), units = "days"))
+  lmin <- max(2, ceiling(minDays / dt))
+  Kmax <- min(Kmax, floor(length(ord) / lmin))
+  if (Kmax < 2) return(list(problem = paste0("too short for segments of at least ", minDays, " days")))
+  seg <- tryCatch(suppressMessages(suppressWarnings(
+    segclust2d::segmentation(data.frame(logFpt = log10(fptv[ord])), seg.var = "logFpt",
+                             lmin = lmin, Kmax = Kmax, subsample = FALSE, sameSigma = TRUE))),
+    error = function(e) e)
+  if (inherits(seg, "error")) return(list(problem = paste("segmentation failed:", conditionMessage(seg))))
+  D <- segclust2d::chooseseg_lavielle(seg$likelihood$likelihood)$lavielle
+  Kauto <- seg$Kopt.lavielle
+  nseg <- if (is.null(K)) Kauto else min(K, Kmax)
+  # segment() prints "User-selected number of segment" also for the automatic choice: keep it out of the log
+  path <- suppressMessages(segclust2d::segment(seg, nseg = nseg))
+  list(rows = ord, begin = path$begin, end = path$end, nseg = nseg, Kauto = Kauto, lmin = lmin,
+       criterion = data.frame(K = seq_along(D) + 1, D = D), problem = NA_character_)
+}
+
+### Helper 9
+# colours of the segments, the same in the plot "Segments" and on the map
+segColours <- function(n) grDevices::hcl.colors(max(n, 2), "Dark 3")[seq_len(n)]
+
 
 ####### shiny Interface
 shinyModuleUserInterface <- function(id, label) {
@@ -120,6 +161,9 @@ shinyModuleUserInterface <- function(id, label) {
   ns <- NS(id)
   
   tagList(
+    # tab names a bit bigger and tabs wider (default: 14px text, 15px padding left and right)
+    # (the tabs above the plots are the only tabs of the App; !important overrides the Bootstrap defaults)
+    tags$head(tags$style(".nav-tabs > li > a, .nav-tabs .nav-link { font-size: 17px !important; padding: 10px 28px !important; }")),
     titlePanel("First Passage Time Segmentation"),
     sidebarLayout(
       sidebarPanel(
@@ -131,7 +175,6 @@ shinyModuleUserInterface <- function(id, label) {
         bsTooltip(id = ns("time_thr"), title = "Define the time threshold with which you will split your tracks into fast and slow movement locations. Locations with a first passage time up to this threshold are fast, above it slow (resting). Select your time unit below.", placement = "bottom", trigger = "hover", options = list(container = "body")),
         selectInput(ns("thr_uni"), label = "Unit of the threshold time", choices = c("seconds", "hours", "days"), selected = "days"),
         bsTooltip(id = ns("thr_uni"), title = "Select the time unit of your selected threshold time. First passage times are given in this unit.", placement = "bottom", trigger = "hover", options = list(container = "body")),
-        checkboxInput(ns("add_fpt_columns"),"Add FPT results to workflow data", value = TRUE),
         actionButton(ns("goButton"), "Apply Changes", class = "btn-primary btn-block"),
         uiOutput(ns("settings_msg")),
         hr(),
@@ -140,27 +183,52 @@ shinyModuleUserInterface <- function(id, label) {
         numericInput(ns("vlf_rmax"), label = "Largest radius (m)", value = 1000000, min = 1),
         numericInput(ns("vlf_n"), label = "Number of radii", value = 50, min = 2, max = 150),
         bsTooltip(id = ns("vlf_n"), title = "The variance of log(FPT) is calculated for this many radii, spaced evenly on a log scale between the smallest and largest radius, for the track selected in the table. The highest variance (peak) indicates the spatial scale at which the animal concentrates its search effort.", placement = "bottom", trigger = "hover", options = list(container = "body")),
-        actionButton(ns("vlf_go"), "Calculate", class = "btn-block"),
+        actionButton(ns("vlf_go"), "Calculate", class = "btn-primary btn-block"),
         uiOutput(ns("vlf_msg")),
+        hr(),
+        h4("Segmentation"),
+        selectInput(ns("seg_k_mode"), "Number of segments", choices = c("automatic", "fixed"), selected = "automatic"),
+        bsTooltip(id = ns("seg_k_mode"), title = "automatic: the number of segments is chosen for each track by the criterion of Lavielle (2005). fixed: every track is divided into the number of segments set below.", placement = "bottom", trigger = "hover", options = list(container = "body")),
+        conditionalPanel("input.seg_k_mode == 'fixed'", ns = ns,
+                         numericInput(ns("seg_k"), "Fixed number of segments", value = 4, min = 1, max = 50)),
+        numericInput(ns("seg_kmax"), "Maximum number of segments", value = 12, min = 2, max = 50),
+        numericInput(ns("seg_lmin_days"), "Minimum segment length (days)", value = 7, min = 0.01),
+        bsTooltip(id = ns("seg_lmin_days"), title = "Shortest phase allowed. It is converted for each track into a number of locations from its median sampling interval.", placement = "bottom", trigger = "hover", options = list(container = "body")),
+        checkboxInput(ns("seg_on_map"), "Show segmentation on map", value = FALSE),
+        actionButton(ns("seg_go"), "Segment", class = "btn-primary btn-block"),
+        uiOutput(ns("seg_msg")),
+        hr(),
+        h4("Add columns to the return data"),
+        # each column on its own; takes effect immediately
+        checkboxInput(ns("add_fpt_value"), "fpt_value (first passage time)", value = FALSE),
+        checkboxInput(ns("add_fpt_behaviour"), "fpt_behaviour (fast / slow)", value = FALSE),
+        checkboxInput(ns("add_fpt_segment"), "fpt_segment (segment number)", value = FALSE),
+        uiOutput(ns("seg_col_msg")),   # reminder to click "Segment" while there are no segments
+        bsTooltip(id = ns("add_fpt_segment"), title = "Only added after 'Segment' was clicked.", placement = "bottom", trigger = "hover", options = list(container = "body")),
         hr(),
         h4("Download"),
         downloadButton(ns("saveMap"), "Map (HTML)", class = "btn-sm"),
         downloadButton(ns("saveMapPng"), "Map (PNG)", class = "btn-sm"),
         downloadButton(ns("saveCsv"), "FPT values (CSV)", class = "btn-sm"),
-        downloadButton(ns("saveSummary"), "Track summary (CSV)", class = "btn-sm")
+        downloadButton(ns("saveSummary"), "Track summary (CSV)", class = "btn-sm"),
+        downloadButton(ns("saveSegments"), "Segments (CSV)", class = "btn-sm")
       ),
       mainPanel(
         width = 9,
         h4("Tracks"),
         helpText("Click a row to show that track in the plot and map."),
         shinycssloaders::withSpinner(DT::dataTableOutput(ns("track_table"))),
-        tabsetPanel(
+        tabsetPanel(id = ns("main_tabs"),
           tabPanel("FPT plot", shinycssloaders::withSpinner(plotOutput(ns("fpt"), height = "60vh"))),
           tabPanel("Map", shinycssloaders::withSpinner(leafletOutput(ns("leafmap"), height = "60vh"))),
           tabPanel("Choose radius",
                    shinycssloaders::withSpinner(plotOutput(ns("vlf_plot"), height = "60vh")),
-                   # "Use peak as radius" or a message, directly under the plot
-                   uiOutput(ns("vlf_peak")))
+                   # "Copy the peak value to radius" or a message, directly under the plot
+                   uiOutput(ns("vlf_peak"))),
+          tabPanel("Segments",
+                   shinycssloaders::withSpinner(plotOutput(ns("seg_plot"), height = "60vh")),
+                   uiOutput(ns("seg_criterion")),
+                   DT::dataTableOutput(ns("seg_table")))
         )
       )
     )
@@ -186,7 +254,9 @@ shinyModule <- function(input, output, session, data) {
   settingsMsg <- reactiveVal(NULL)
   vlfRes <- reactiveVal(NULL)
   vlfMsg <- reactiveVal(NULL)
-  addFptColumnsApplied <- reactiveVal(TRUE)
+  vlfCopied <- reactiveVal(NULL)   # peak copied to the radius setting, until "Apply Changes" is clicked
+  segRes <- reactiveVal(NULL)      # segments of all tracks of the last click on "Segment"
+  segMsg <- reactiveVal(NULL)
   
   ## FPT calculation: runs once at App start and on every click of "Apply Changes" ##
   observeEvent(input$goButton, {
@@ -200,7 +270,6 @@ shinyModule <- function(input, output, session, data) {
     radius <- input$radius
     thr <- input$time_thr
     unit <- input$thr_uni
-    addFptColumnsApplied(isTRUE(input$add_fpt_columns))
     
     trackRows <- split(seq_len(nrow(data)), mt_track_id(data), drop = TRUE)
     fptv <- rep(NA_real_, nrow(data))
@@ -221,9 +290,6 @@ shinyModule <- function(input, output, session, data) {
       }
     })
     
-    if (any(c("fpt_value", "fpt_behaviour") %in% names(data))) {
-      logger.warn("The input data already contains the column(s) fpt_value and/or fpt_behaviour. They are overwritten.")
-    }
     annotated <- data
     annotated$fpt_value <- fptv
     annotated$fpt_behaviour <- classifyFPT(fptv, thr)
@@ -310,16 +376,19 @@ shinyModule <- function(input, output, session, data) {
     req(res)
     i <- selectedIdx()
     tid <- res$overview$Track[i]
-    trk <- res$data[res$trackRows[[i]], ]
-    trk <- trk[!sf::st_is_empty(trk), ]
-    validate(need(nrow(trk) > 0, paste0("Track ", tid, " has no locations to show.")))
-    trk <- trk[order(mt_time(trk)), ]
-    trk_ll <- sf::st_transform(trk, 4326)
+    # rows of the selected track with a location, in time order
+    keep <- res$trackRows[[i]]
+    keep <- keep[!sf::st_is_empty(res$data[keep, ])]
+    validate(need(length(keep) > 0, paste0("Track ", tid, " has no locations to show.")))
+    keep <- keep[order(mt_time(res$data)[keep])]
+    trk_ll <- sf::st_transform(res$data[keep, ], 4326)
     xy <- sf::st_coordinates(trk_ll)
     cls <- trk_ll$fpt_behaviour
-    popup <- sprintf("<b>Time (UTC):</b> %s<br><b>FPT:</b> %s %s<br><b>Class:</b> %s",
-                     formatTime(mt_time(trk_ll)), round(trk_ll$fpt_value, 2), res$unit,
-                     ifelse(is.na(cls), "not classified", cls))
+    segNo <- if (isTRUE(input$seg_on_map)) segColumn()[keep] else rep(NA_integer_, length(keep))
+    popup <- paste0(sprintf("<b>Time (UTC):</b> %s<br><b>FPT:</b> %s %s<br><b>Class:</b> %s",
+                            formatTime(mt_time(trk_ll)), round(trk_ll$fpt_value, 2), res$unit,
+                            ifelse(is.na(cls), "not classified", cls)),
+                    ifelse(is.na(segNo), "", paste0("<br><b>Segment:</b> ", segNo)))
     fast <- which(cls %in% "fast")
     slow <- which(cls %in% "slow")
     bounds <- as.vector(sf::st_bbox(trk_ll))
@@ -335,6 +404,25 @@ shinyModule <- function(input, output, session, data) {
       outl <- addCircles(outl, lng = xy[slow, 1], lat = xy[slow, 2], popup = popup[slow],
                          fillOpacity = 0.3, opacity = 0.5, color = "darkgreen", group = "slow movement")
     }
+    # segments of the selected track as thick lines, one colour per segment (as in the plot "Segments"),
+    # only while "Show segmentation on map" is ticked
+    sr <- segRes()
+    s <- if (!is.null(sr) && isTRUE(input$seg_on_map)) sr$tracks[[i]] else NULL
+    if (!is.null(s) && is.na(s$problem)) {
+      cols <- segColours(s$nseg)
+      for (k in seq_len(s$nseg)) {
+        r <- s$rows[s$begin[k]:s$end[k]]            # rows of this segment, in time order
+        r <- r[!sf::st_is_empty(res$data[r, ])]
+        if (length(r) == 0) next
+        g <- sf::st_coordinates(sf::st_transform(res$data[r, ], 4326))
+        outl <- addPolylines(outl, lng = g[, 1], lat = g[, 2], color = cols[k], weight = 4, opacity = 0.9,
+                             group = "segments",
+                             popup = paste0("<b>Segment ", k, "</b><br>", formatTime(min(mt_time(res$data)[r])),
+                                            " to ", formatTime(max(mt_time(res$data)[r]))))
+      }
+      outl <- addLegend(outl, position = "bottomright", colors = cols, labels = paste("segment", seq_len(s$nseg)),
+                        opacity = 0.9, title = "segments", group = "segments")
+    }
     outl %>%
       addLegend(position = "topright", colors = c("blue", "red", "darkgreen"),
                 labels = c("lines", "fast movement", "slow movement"), opacity = 0.7, title = paste("track", tid)) %>%
@@ -344,7 +432,7 @@ shinyModule <- function(input, output, session, data) {
   
   
   output$leafmap <- renderLeaflet({
-    addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"))
+    addBaseMaps(mapLayers(), mapGroups())
   })
   
   ## variance of log(FPT) over a range of radii for the selected track ##
@@ -358,6 +446,8 @@ shinyModule <- function(input, output, session, data) {
       return()
     }
     vlfMsg(NULL)
+    # show the result: open the tab "Choose radius"
+    updateTabsetPanel(session, "main_tabs", selected = "Choose radius")
     i <- selectedIdx()
     tid <- res$overview$Track[i]
     lt <- trackLtraj(data_ll[res$trackRows[[i]], ])
@@ -377,6 +467,7 @@ shinyModule <- function(input, output, session, data) {
     peak <- if (length(ok) > 0) which.max(vv) else NA_integer_
     # a maximum at the first or last radius with a value is not a real peak: the range is too narrow
     atEdge <- !is.na(peak) && peak %in% range(ok)
+    vlfCopied(NULL)   # a new curve: no copied peak yet
     vlfRes(list(track = tid, radii = radii, var = vv, peak = peak, atEdge = atEdge, problem = NA_character_))
   })
 
@@ -391,8 +482,15 @@ shinyModule <- function(input, output, session, data) {
                "This is not a real peak: please widen the range of radii."), style = "color: #d9822b;")
     } else {
       # the value of the peak is written on the plot
+      copied <- vlfCopied()
       div(style = "text-align: center;",
-          actionButton(ns("vlf_use"), "Use peak as radius", class = "btn-sm"))
+          actionButton(ns("vlf_use"), "Copy the peak value to radius", class = "btn-primary btn-sm"),
+          if (!is.null(copied)) {
+            p(paste0("The peak value (", format(copied, big.mark = ","), " m) was copied to ",
+                     "'Radius parameter for First Passage Time (m)'. Click 'Apply Changes' to recalculate ",
+                     "the first passage times with this radius."),
+              style = "color: #d9822b; margin-top: 0.5em;")
+          })
     }
   })
 
@@ -400,7 +498,9 @@ shinyModule <- function(input, output, session, data) {
   observeEvent(input$vlf_use, {
     vr <- vlfRes()
     req(vr, !is.na(vr$peak), !vr$atEdge)
-    updateNumericInput(session, "radius", value = round(vr$radii[vr$peak]))
+    value <- round(vr$radii[vr$peak])
+    updateNumericInput(session, "radius", value = value)
+    vlfCopied(value)   # shows the reminder to click "Apply Changes"
   })
   
   output$vlf_msg <- renderUI({
@@ -438,14 +538,178 @@ shinyModule <- function(input, output, session, data) {
            horiz = TRUE, bty = "n", cex = 1.2, text.font = 2,
            legend = c("peak", "current radius"), col = c("red", "blue"), lty = c(1, 2), lwd = c(2, 1))
   }, execOnResize = TRUE)   # redraw on resize (e.g. moving to another monitor) instead of replaying
-  
+
+  ## segmentation of the FPT series of all tracks into phases ##
+  # segments belong to the FPT values they were calculated from: clear them after "Apply Changes"
+  observeEvent(results(), {
+    segRes(NULL)
+    segMsg(NULL)
+    vlfCopied(NULL)   # "Apply Changes" was clicked: the reminder under "Copy the peak value to radius" is done
+  })
+
+  observeEvent(input$seg_go, {
+    res <- results()
+    req(res)
+    fixed <- identical(input$seg_k_mode, "fixed")
+    msg <- checkSegSettings(input$seg_lmin_days, input$seg_kmax, if (fixed) input$seg_k else NULL)
+    if (!is.null(msg)) {
+      segMsg(msg)
+      logger.info(msg)
+      return()
+    }
+    segMsg(NULL)
+    # show the result: open the tab "Segments", unless the user is looking at the map
+    # with "Show segmentation on map" ticked
+    if (!(identical(input$main_tabs, "Map") && isTRUE(input$seg_on_map))) {
+      updateTabsetPanel(session, "main_tabs", selected = "Segments")
+    }
+    minDays <- input$seg_lmin_days
+    Kmax <- round(input$seg_kmax)
+    K <- if (fixed) round(input$seg_k) else NULL
+    tms <- mt_time(res$data)
+    tids <- names(res$trackRows)
+    tracks <- vector("list", length(tids))
+    withProgress(message = "Segmenting first passage times", value = 0, {
+      for (j in seq_along(tids)) {
+        rows <- res$trackRows[[j]]
+        s <- segmentTrack(res$data$fpt_value[rows], tms[rows], minDays, Kmax, K)
+        if (is.na(s$problem)) {
+          s$rows <- rows[s$rows]   # back to row numbers of the data
+        } else {
+          logger.warn(paste0("Track ", tids[j], " was not segmented: ", s$problem, "."))
+        }
+        tracks[[j]] <- s
+        incProgress(1 / length(tids), detail = tids[j])
+      }
+    })
+
+    # one row per segment; one row with a note for a track that was not segmented
+    segRow <- function(tid, i = NA, from = NA, to = NA, n = NA, med = NA, note = "") {
+      data.frame("Track" = tid,
+                 "Segment" = i,
+                 "From (UTC)" = if (is.na(i)) NA else formatTime(from),
+                 "To (UTC)" = if (is.na(i)) NA else formatTime(to),
+                 "Duration (days)" = if (is.na(i)) NA else round(as.numeric(difftime(to, from, units = "days")), 1),
+                 "Locations" = n,
+                 "Median FPT" = if (is.na(i)) NA else round(med, 2),
+                 "Class" = if (is.na(i)) NA else classifyFPT(med, res$thr),
+                 "Note" = note,
+                 check.names = FALSE)
+    }
+    table <- do.call(rbind, lapply(seq_along(tids), function(j) {
+      s <- tracks[[j]]
+      if (!is.na(s$problem)) return(segRow(tids[j], note = paste("not segmented:", s$problem)))
+      do.call(rbind, lapply(seq_len(s$nseg), function(i) {
+        r <- s$rows[s$begin[i]:s$end[i]]
+        segRow(tids[j], i, min(tms[r]), max(tms[r]), length(r), 10^median(log10(res$data$fpt_value[r])))
+      }))
+    }))
+    names(table)[names(table) == "Median FPT"] <- paste0("Median FPT (", res$unit, ")")
+
+    nok <- sum(vapply(tracks, function(s) is.na(s$problem), logical(1)))
+    logger.info(paste0("Segmented ", nok, " of ", length(tids), " track(s) with minimum segment length ", minDays,
+                       " days and ", if (fixed) paste(K, "segments") else "automatic number of segments", "."))
+    segRes(list(tracks = tracks, table = table, unit = res$unit, radius = res$radius,
+                minDays = minDays, mode = if (fixed) paste("fixed:", K) else "automatic"))
+  })
+
+  # segment number of every location; NA where the location has no FPT, its track was not
+  # segmented or "Segment" was not clicked yet
+  segColumn <- reactive({
+    sr <- segRes()
+    res <- results()
+    req(res)
+    col <- rep(NA_integer_, nrow(res$data))
+    if (!is.null(sr)) for (s in sr$tracks) {
+      if (is.na(s$problem)) col[s$rows] <- findInterval(seq_along(s$rows), s$begin)
+    }
+    col
+  })
+
+  # overlay groups of the map; "segments" only if "Show segmentation on map" is ticked
+  # and the selected track was segmented
+  mapGroups <- reactive({
+    sr <- segRes()
+    s <- if (!is.null(sr) && isTRUE(input$seg_on_map)) sr$tracks[[selectedIdx()]] else NULL
+    c("lines", "fast movement", "slow movement", if (!is.null(s) && is.na(s$problem)) "segments")
+  })
+
+  # under the checkbox fpt_segment: it is ticked, but there are no segments (not segmented yet,
+  # or removed by "Apply Changes")
+  output$seg_col_msg <- renderUI({
+    if (isTRUE(input$add_fpt_segment) && is.null(segRes())) {
+      p("fpt_segment is not added yet: click 'Segment' first.", style = "color: #d9822b; margin-top: -0.5em;")
+    }
+  })
+
+  output$seg_msg <- renderUI({
+    if (!is.null(segMsg())) p(segMsg(), style = "color: red;")
+  })
+
+  output$seg_plot <- renderPlot({
+    sr <- segRes()
+    validate(need(!is.null(sr), "Set the segmentation settings in the sidebar and click 'Segment' to divide the first passage times of all tracks into phases."))
+    res <- results()
+    req(res)
+    i <- selectedIdx()
+    tid <- res$overview$Track[i]
+    s <- sr$tracks[[i]]
+    validate(need(is.na(s$problem), paste0("Track ", tid, " was not segmented: ", s$problem, ".")))
+    tms <- mt_time(res$data)[s$rows]
+    v <- res$data$fpt_value[s$rows]
+    segOf <- findInterval(seq_along(v), s$begin)   # segment of each location
+    cols <- segColours(s$nseg)
+    par(mar = c(5.1, 4.1, 6, 2.1))   # extra space at the top for the legend
+    validate(need(plotFits(), "The plot area is too small. Please enlarge the window."))
+    plot(tms, v, type = "n", log = "y", main = "", xlab = "time", yaxt = "n",
+         ylab = paste0("FPT (", sr$unit, ", log scale)"))
+    # y axis labels as plain numbers (0.05, 0.5, 5, 50) instead of 5e-02 ...
+    at <- axTicks(2)
+    axis(2, at = at, labels = format(at, scientific = FALSE, drop0trailing = TRUE, trim = TRUE))
+    title(main = tid, line = 3.5)    # title above the legend
+    lines(tms, v, col = "grey75")
+    points(tms, v, pch = 20, col = cols[segOf])
+    for (k in seq_len(s$nseg)) {
+      idx <- s$begin[k]:s$end[k]
+      med <- 10^median(log10(v[idx]))
+      segments(tms[s$begin[k]], med, tms[s$end[k]], med, col = cols[k], lwd = 4)
+    }
+    if (s$nseg > 1) abline(v = tms[s$begin[-1]], col = "grey30", lty = 2)
+    # legend directly above the plot area; on the log y axis par("usr") holds log10 values, hence 10^
+    usr <- par("usr")
+    legend(x = mean(usr[1:2]), y = 10^usr[4], xjust = 0.5, yjust = 0, xpd = TRUE,
+           horiz = TRUE, bty = "n", cex = 1.2, text.font = 2,
+           legend = c("segment median (colour = segment)", "break"), col = c("black", "grey30"), lty = c(1, 2), lwd = c(4, 1))
+  }, execOnResize = TRUE)   # redraw on resize (e.g. moving to another monitor) instead of replaying
+
+  output$seg_criterion <- renderUI({
+    sr <- segRes()
+    req(sr)
+    s <- sr$tracks[[selectedIdx()]]
+    req(is.na(s$problem))
+    d <- s$criterion
+    p(paste0(s$nseg, " segment(s) (automatic choice: ", s$Kauto, "; minimum segment length: ", s$lmin, " locations). ",
+             "Lavielle criterion D by number of segments (a value above 0.75 supports that number): ",
+             paste0(d$K, ": ", round(d$D, 2), collapse = " | ")))
+  })
+
+  output$seg_table <- DT::renderDataTable({
+    sr <- segRes()
+    req(sr)
+    res <- results()
+    req(res)
+    tid <- res$overview$Track[selectedIdx()]
+    DT::datatable(sr$table[sr$table$Track == tid, , drop = FALSE], rownames = FALSE, selection = "none",
+                  options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  })
+
   ## downloads ##
   output$saveMap <- downloadHandler(
     filename = "FPT_LeafletMap.html",
     content = function(file) {
       shinybusy::show_modal_spinner(text = "Preparing map ...")
       on.exit(shinybusy::remove_modal_spinner())
-      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"), osm = FALSE), file = file)
+      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), mapGroups(), osm = FALSE), file = file)
     }
   )
   
@@ -460,7 +724,7 @@ shinyModule <- function(input, output, session, data) {
       # session$token in the name, so two users never write or delete each other's file
       html_file <- paste0("FPT_map_export_", session$token, ".html")
       on.exit(unlink(c(html_file, sub("\\.html$", "_files", html_file)), recursive = TRUE), add = TRUE)
-      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), c("lines", "fast movement", "slow movement"), osm = FALSE),
+      htmlwidgets::saveWidget(widget = addBaseMaps(mapLayers(), mapGroups(), osm = FALSE),
                               file = html_file, selfcontained = TRUE)
       Sys.sleep(2)
       webshot2::webshot(url = html_file, file = file, vwidth = 1000, vheight = 800, delay = 2)
@@ -487,6 +751,7 @@ shinyModule <- function(input, output, session, data) {
                         "fpt_behaviour" = d$fpt_behaviour,
                         "radius_m" = res$radius,
                         "threshold" = res$thr,
+                        "fpt_segment" = segColumn(),
                         check.names = FALSE)
       names(out)[1:2] <- c(mt_track_id_column(d), paste0(mt_time_column(d), "_UTC"))
       write.csv(out, file, row.names = FALSE)
@@ -505,19 +770,49 @@ shinyModule <- function(input, output, session, data) {
       write.csv(out, file, row.names = FALSE)
     }
   )
-  
+
+  output$saveSegments <- downloadHandler(
+    filename = "FPT_segments.csv",
+    content = function(file) {
+      sr <- segRes()
+      if (is.null(sr)) {
+        write.csv(data.frame(Note = "No segments: click 'Segment' in the sidebar first."), file, row.names = FALSE)
+        return(invisible())
+      }
+      out <- sr$table
+      out$radius_m <- sr$radius
+      out$fpt_unit <- sr$unit
+      out$min_segment_days <- sr$minDays
+      out$number_of_segments <- sr$mode
+      write.csv(out, file, row.names = FALSE)
+    }
+  )
+
+  # columns of the input data that are replaced; each is reported once in the log
+  overwriteWarned <- character()
+
   # data must be returned. Either the unmodified input data, or the modified data by the app
   reactive({
     res <- results()
-    
+
     if (is.null(res)) {
       return(data)
     }
-    
-    if (isTRUE(addFptColumnsApplied())) {
-      res$data
-    } else {
-      data
+
+    # one checkbox per column ("Add columns to the return data"); they take effect immediately
+    out <- data
+    if (isTRUE(input$add_fpt_value)) out$fpt_value <- res$data$fpt_value
+    if (isTRUE(input$add_fpt_behaviour)) out$fpt_behaviour <- res$data$fpt_behaviour
+    # segment numbers only after "Segment"; they are cleared with every "Apply Changes"
+    if (isTRUE(input$add_fpt_segment) && !is.null(segRes())) out$fpt_segment <- segColumn()
+
+    replaced <- setdiff(intersect(c("fpt_value", "fpt_behaviour", "fpt_segment"), names(out)), overwriteWarned)
+    replaced <- replaced[replaced %in% names(data)]
+    if (length(replaced) > 0) {
+      logger.warn(paste0("The input data already contains the column(s) ", paste(replaced, collapse = ", "),
+                         ". They are replaced by the values of this App."))
+      overwriteWarned <<- c(overwriteWarned, replaced)
     }
+    out
   })
 }

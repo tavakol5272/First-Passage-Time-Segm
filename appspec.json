@@ -8,6 +8,7 @@
       { "name": "sf" },
       { "name": "sp" },
       { "name": "adehabitatLT" },
+      { "name": "segclust2d" },
       { "name": "leaflet" },
       { "name": "htmlwidgets" },
       { "name": "webshot2" },
