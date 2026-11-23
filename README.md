@@ -22,7 +22,7 @@ All tracks are listed in an overview table with their first and last timestamp, 
 
 - **FPT plot**: FPT over time, with fast locations in red, slow locations in green and the threshold as a blue line. The legend is shown above the plot.
 - **Map**: the track as a line with the fast (red) and slow (green) locations; clicking a location shows its time, FPT value and class. Base maps: Esri topographic map (default), Esri aerial imagery and OpenStreetMap.
-- **Choose radius**: the variance of log(FPT) for a range of radii (Fauchald & Tveraa 2003). A peak in this curve indicates the spatial scale at which the animal concentrates its activity and can be used to choose the radius. Several peaks can indicate behaviour at several scales. The plot is calculated for the track selected in the table when `Calculate` is clicked. The radius currently used for the FPT is shown as a dashed blue line; the legend is shown above the plot.
+- **Choose radius**: the variance of log(FPT) for a range of radii (Fauchald & Tveraa 2003), following the approach in *Analysing and Mapping of Animal Movement in R* (Kranstauber, Safi & Scharf). The radii are spaced evenly on a log scale and the radius axis is logarithmic, so that small scales are resolved as well as large ones. A peak in this curve indicates the spatial scale at which the animal concentrates its activity and can be used to choose the radius. Several peaks can indicate behaviour at several scales. The plot is calculated for the track selected in the table when `Calculate` is clicked. The highest variance (peak) is marked with a red line and its radius is written on the plot ("Peak at … m"); `Use peak as radius`, under the plot, copies it into the radius setting. If the highest variance lies at the smallest or largest radius, it is not a real peak, and a message under the plot asks to widen the range of radii. The radius currently used for the FPT is shown as a dashed blue line; the legend is shown above the plot. Note that for multi-year tracks of migratory animals the peak can reflect the movement within the breeding or wintering range rather than an area-restricted search.
 
 If `Add FPT results to workflow data` is selected (default), the FPT values and classes of all tracks are added to the output data, so that they can be used in subsequent Apps. Otherwise the input data are passed on unchanged.
 
@@ -73,11 +73,13 @@ Click a row in the table to show that track in the FPT plot, the map and the plo
 
 `Smallest radius (m)` (vlf_rmin): smallest radius for the variance of log(FPT). Default: 1000.
 
-`Largest radius (m)` (vlf_rmax): largest radius for the variance of log(FPT). Default: 100000.
+`Largest radius (m)` (vlf_rmax): largest radius for the variance of log(FPT). Default: 1000000.
 
-`Number of radii` (vlf_n): number of radii, evenly spaced between the smallest and largest radius (2 to 100). Default: 20.
+`Number of radii` (vlf_n): number of radii, spaced evenly on a log scale between the smallest and largest radius (2 to 150). More radii give a more precise peak but take longer to calculate. Default: 50.
 
 `Calculate`: calculates the variance of log(FPT) for the track selected in the table and shows it in the tab "Choose radius".
+
+`Use peak as radius`: shown under the plot in the tab "Choose radius" after `Calculate`, when the curve has a peak. Copies the radius of the peak into `Radius parameter for First Passage Time (m)`; click `Apply Changes` to recalculate the FPT with it.
 
 ### Changes in output data
 If `Add FPT results to workflow data` is selected (default), the App adds the columns `fpt_value` (first passage time in the selected unit) and `fpt_behaviour` (`fast`, `slow` or NA) to the input data. All other data remain unchanged. If it is not selected, the output data are the unchanged input data.
@@ -88,6 +90,8 @@ If `Add FPT results to workflow data` is selected (default), the App adds the co
 **Input data:** tracks with fewer than 3 locations or duplicated timestamps are not analysed; their FPT values are NA and the reason is shown in the table.
 
 **All locations fast or slow:** the threshold does not fit the FPT values. Adapt the threshold or its unit, or choose another radius with "Choose radius".
+
+**No peak in "Choose radius":** if the highest variance of log(FPT) lies at the smallest or largest radius, an orange message under the plot asks to widen the range of radii, and neither the peak value nor `Use peak as radius` is shown. If no variance can be calculated for the range, a red message is shown under the plot.
 
 **Small plot area:** if the window is too small for a plot, the message "The plot area is too small. Please enlarge the window." is shown instead of the plot.
 
