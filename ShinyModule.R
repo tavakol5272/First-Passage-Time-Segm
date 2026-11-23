@@ -25,7 +25,7 @@ checkSettings <- function(radius, thr) {
 checkRadii <- function(rmin, rmax, n) {
   if (!isTRUE(is.finite(rmin) && rmin > 0)) return("Please enter a smallest radius larger than 0 m.")
   if (!isTRUE(is.finite(rmax) && rmax > rmin)) return("The largest radius must be larger than the smallest radius.")
-  if (!isTRUE(is.finite(n) && n >= 2 && n <= 100)) return("The number of radii must be between 2 and 100.")
+  if (!isTRUE(is.finite(n) && n >= 2 && n <= 150)) return("The number of radii must be between 2 and 150.")
   NULL
 }
 
@@ -137,9 +137,9 @@ shinyModuleUserInterface <- function(id, label) {
         hr(),
         h4("Choose radius"),
         numericInput(ns("vlf_rmin"), label = "Smallest radius (m)", value = 1000, min = 1),
-        numericInput(ns("vlf_rmax"), label = "Largest radius (m)", value = 100000, min = 1),
-        numericInput(ns("vlf_n"), label = "Number of radii", value = 20, min = 2, max = 100),
-        bsTooltip(id = ns("vlf_n"), title = "The variance of log(FPT) is calculated for this many radii between the smallest and largest radius, for the track selected in the table. A peak indicates the spatial scale at which the animal concentrates its search effort.", placement = "bottom", trigger = "hover", options = list(container = "body")),
+        numericInput(ns("vlf_rmax"), label = "Largest radius (m)", value = 1000000, min = 1),
+        numericInput(ns("vlf_n"), label = "Number of radii", value = 50, min = 2, max = 150),
+        bsTooltip(id = ns("vlf_n"), title = "The variance of log(FPT) is calculated for this many radii, spaced evenly on a log scale between the smallest and largest radius, for the track selected in the table. The highest variance (peak) indicates the spatial scale at which the animal concentrates its search effort.", placement = "bottom", trigger = "hover", options = list(container = "body")),
         actionButton(ns("vlf_go"), "Calculate", class = "btn-block"),
         uiOutput(ns("vlf_msg")),
         hr(),
@@ -157,7 +157,10 @@ shinyModuleUserInterface <- function(id, label) {
         tabsetPanel(
           tabPanel("FPT plot", shinycssloaders::withSpinner(plotOutput(ns("fpt"), height = "60vh"))),
           tabPanel("Map", shinycssloaders::withSpinner(leafletOutput(ns("leafmap"), height = "60vh"))),
-          tabPanel("Choose radius", shinycssloaders::withSpinner(plotOutput(ns("vlf_plot"), height = "60vh")))
+          tabPanel("Choose radius",
+                   shinycssloaders::withSpinner(plotOutput(ns("vlf_plot"), height = "60vh")),
+                   # "Use peak as radius" or a message, directly under the plot
+                   uiOutput(ns("vlf_peak")))
         )
       )
     )
@@ -362,13 +365,42 @@ shinyModule <- function(input, output, session, data) {
       vlfRes(list(track = tid, problem = lt$problem))
       return()
     }
-    radii <- seq(input$vlf_rmin, input$vlf_rmax, length.out = round(input$vlf_n))
+    # radii evenly spaced on a log scale: more radii at small scales, where the detail is
+    radii <- exp(seq(log(input$vlf_rmin), log(input$vlf_rmax), length.out = round(input$vlf_n)))
     withProgress(message = "Calculating variance of log(FPT)", value = 0.5, {
       # the variance of log(FPT) does not depend on the time unit
       f <- adehabitatLT::fpt(lt$ltraj, radii = radii, units = "seconds")
       v <- adehabitatLT::varlogfpt(f, graph = FALSE)
     })
-    vlfRes(list(track = tid, radii = radii, var = as.numeric(v[1, ]), problem = NA_character_))
+    vv <- as.numeric(v[1, ])
+    ok <- which(!is.na(vv))
+    peak <- if (length(ok) > 0) which.max(vv) else NA_integer_
+    # a maximum at the first or last radius with a value is not a real peak: the range is too narrow
+    atEdge <- !is.na(peak) && peak %in% range(ok)
+    vlfRes(list(track = tid, radii = radii, var = vv, peak = peak, atEdge = atEdge, problem = NA_character_))
+  })
+
+  output$vlf_peak <- renderUI({
+    vr <- vlfRes()
+    req(vr, is.na(vr$problem))
+    if (is.na(vr$peak)) {
+      p("No variance of log(FPT) could be calculated for this range of radii.", style = "color: red;")
+    } else if (vr$atEdge) {
+      p(paste0("The highest variance is at the ", if (vr$peak == min(which(!is.na(vr$var)))) "smallest" else "largest",
+               " radius (", format(round(vr$radii[vr$peak]), big.mark = ","), " m). ",
+               "This is not a real peak: please widen the range of radii."), style = "color: #d9822b;")
+    } else {
+      # the value of the peak is written on the plot
+      div(style = "text-align: center;",
+          actionButton(ns("vlf_use"), "Use peak as radius", class = "btn-sm"))
+    }
+  })
+
+  # copy the peak into the radius setting; "Apply Changes" then recalculates the FPT
+  observeEvent(input$vlf_use, {
+    vr <- vlfRes()
+    req(vr, !is.na(vr$peak), !vr$atEdge)
+    updateNumericInput(session, "radius", value = round(vr$radii[vr$peak]))
   })
   
   output$vlf_msg <- renderUI({
@@ -382,17 +414,29 @@ shinyModule <- function(input, output, session, data) {
     res <- results()
     par(mar = c(5.1, 4.1, 6, 2.1))   # extra space at the top for the legend
     validate(need(plotFits(), "The plot area is too small. Please enlarge the window."))
-    plot(vr$radii, vr$var, type = "b", pch = 20, main = "",
-         xlab = "radius (m)", ylab = "variance of log(FPT)")
+    plot(vr$radii, vr$var, type = "b", pch = 20, log = "x", main = "",
+         xlab = "radius (m, log scale)", ylab = "variance of log(FPT)")
     title(main = paste("Track", vr$track), line = 3.5)   # title above the legend
-    if (!is.null(res)) {
-      abline(v = res$radius, col = "blue", lty = 2)
-      # legend directly above the plot area, between the title and the plot
-      usr <- par("usr")
-      legend(x = mean(usr[1:2]), y = usr[4], xjust = 0.5, yjust = 0, xpd = TRUE,
-             horiz = TRUE, bty = "n", cex = 1.2, text.font = 2,
-             legend = "current radius", col = "blue", lty = 2)
+    if (!is.na(vr$peak)) {
+      abline(v = vr$radii[vr$peak], col = "red", lwd = 2)
+      points(vr$radii[vr$peak], vr$var[vr$peak], pch = 19, cex = 2, col = "red")
     }
+    if (!is.na(vr$peak) && !vr$atEdge) {
+      usr <- par("usr")
+      xp <- vr$radii[vr$peak]
+      # label at the bottom of the red line; to its right, or to its left if the peak is in the right half
+      right <- log10(xp) < mean(usr[1:2])
+      text(x = xp, y = usr[3] + 0.04 * diff(usr[3:4]),
+           labels = paste0("Peak at ", format(round(xp), big.mark = ","), " m"),
+           pos = if (right) 4 else 2, col = "red", font = 2, cex = 1.2)
+    }
+    if (!is.null(res)) abline(v = res$radius, col = "blue", lty = 2)
+    # legend directly above the plot area, between the title and the plot;
+    # on the log axis par("usr") holds log10 values, hence 10^
+    usr <- par("usr")
+    legend(x = 10^mean(usr[1:2]), y = usr[4], xjust = 0.5, yjust = 0, xpd = TRUE,
+           horiz = TRUE, bty = "n", cex = 1.2, text.font = 2,
+           legend = c("peak", "current radius"), col = c("red", "blue"), lty = c(1, 2), lwd = c(2, 1))
   }, execOnResize = TRUE)   # redraw on resize (e.g. moving to another monitor) instead of replaying
   
   ## downloads ##
